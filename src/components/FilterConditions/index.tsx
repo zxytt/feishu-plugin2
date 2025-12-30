@@ -58,22 +58,13 @@ export default function FilterConditions({
   const isCreate = dashboard.state === DashboardState.Create;
   const isConfig = dashboard.state === DashboardState.Config || isCreate;
 
-  // 配置管理
-  const updateConfig = (res: IConfig) => {
-    const { customConfig } = res;
-    if (customConfig) {
-      setConfig({ ...defaultConfig, ...(customConfig as any) });
-    }
-  };
-
-  useConfig(updateConfig);
-
   const fetchFilterConditions = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       // 获取文档（base）信息
       const base = bitable.base;
+      console.log('base', base);
       let baseMeta: any = null;
       
       // 尝试获取 base 名称，如果没有直接方法，使用默认值
@@ -94,40 +85,54 @@ export default function FilterConditions({
       // 获取文档级别的筛选条件
       // 尝试从 dashboard 的配置中获取 dataConditions
       let filterInfo: any = null;
+      let dataConditions: any[] = [];
       
       try {
-        // 方法1: 从 dashboard 配置中获取 dataConditions
-        const dashboardConfig = await dashboard.getConfig();
-        if (dashboardConfig && (dashboardConfig as any).dataConditions) {
-          filterInfo = {
-            conditions: (dashboardConfig as any).dataConditions,
-          };
-        }
-        
-        // 方法2: 尝试从 base 级别获取筛选条件
-        if (!filterInfo) {
-          if (typeof (base as any).getFilterInfo === 'function') {
-            filterInfo = await (base as any).getFilterInfo();
-          } else if (typeof (base as any).getFilters === 'function') {
-            filterInfo = await (base as any).getFilters();
-          } else if (typeof (base as any).getFilterConditions === 'function') {
-            filterInfo = await (base as any).getFilterConditions();
-          } else if (baseMeta) {
-            // 尝试从 base 元数据中获取
-            filterInfo = baseMeta.filterInfo || baseMeta.filters || null;
+        // 方法3: 尝试从 base 级别获取筛选条件
+          try {
+            if (typeof (base as any).getFilterInfo === 'function') {
+              filterInfo = await (base as any).getFilterInfo();
+              console.log('从 base.getFilterInfo() 获取到筛选条件:', filterInfo);
+            } else if (typeof (base as any).getFilters === 'function') {
+              filterInfo = await (base as any).getFilters();
+              console.log('从 base.getFilters() 获取到筛选条件:', filterInfo);
+            } else if (typeof (base as any).getFilterConditions === 'function') {
+              filterInfo = await (base as any).getFilterConditions();
+              console.log('从 base.getFilterConditions() 获取到筛选条件:', filterInfo);
+            } else if (baseMeta) {
+              // 尝试从 base 元数据中获取
+              filterInfo = baseMeta.filterInfo || baseMeta.filters || null;
+              if (filterInfo) {
+                console.log('从 baseMeta 获取到筛选条件:', filterInfo);
+              }
+            }
+          } catch (e) {
+            console.warn('从 base 获取筛选条件失败:', e);
           }
-        }
       } catch (filterError: any) {
         console.warn('获取筛选条件时出错:', filterError);
         // 继续执行，filterInfo 为 null
       }
       
+      // 如果 filterInfo 是数组，直接使用
+      if (Array.isArray(filterInfo) && filterInfo.length > 0) {
+        filterInfo = { conditions: filterInfo };
+      }
+      
+      // 如果 filterInfo 有 conditions 属性，使用它
+      if (filterInfo && !filterInfo.conditions && Array.isArray(filterInfo)) {
+        filterInfo = { conditions: filterInfo };
+      }
+      
       if (!filterInfo || !filterInfo.conditions || filterInfo.conditions.length === 0) {
+        console.log('未找到筛选条件，当前 filterInfo:', filterInfo);
         setFilters([]);
         onFilterChange?.([]);
         setLoading(false);
         return;
       }
+      
+      console.log('找到筛选条件:', filterInfo.conditions);
 
       // 获取所有表格的字段信息，用于映射字段ID到字段名
       const tableList = await base.getTableList();
@@ -208,6 +213,33 @@ export default function FilterConditions({
     }
   }, [onFilterChange]);
 
+  // 配置管理
+  const updateConfig = useCallback((res: IConfig) => {
+    const { customConfig, dataConditions } = res;
+    if (customConfig) {
+      setConfig({ ...defaultConfig, ...(customConfig as any) });
+    }
+    // 如果 dataConditions 变化，自动刷新筛选条件
+    if (dataConditions !== undefined) {
+      fetchFilterConditions();
+    }
+  }, [fetchFilterConditions]);
+
+  useConfig(updateConfig);
+
+  // 监听配置变化，自动更新筛选条件
+  useEffect(() => {
+    const offConfigChange = dashboard.onConfigChange((r) => {
+      // 当配置变化时，检查 dataConditions 是否变化
+      if (r.data && (r.data as any).dataConditions !== undefined) {
+        fetchFilterConditions();
+      }
+    });
+    return () => {
+      offConfigChange();
+    };
+  }, [fetchFilterConditions]);
+
   useEffect(() => {
     fetchFilterConditions();
 
@@ -225,6 +257,47 @@ export default function FilterConditions({
       }
     };
   }, [fetchFilterConditions, config.autoRefresh, config.refreshInterval]);
+
+  // 监听视图和表格变化，自动刷新筛选条件
+  useEffect(() => {
+    let viewChangeListener: (() => void) | null = null;
+    let tableChangeListener: (() => void) | null = null;
+    
+    try {
+      const base = bitable.base;
+      // 尝试监听视图变化
+      if (typeof (base as any).onViewChange === 'function') {
+        viewChangeListener = (base as any).onViewChange(() => {
+          console.log('视图变化，刷新筛选条件');
+          fetchFilterConditions();
+        });
+      } else if (typeof (base as any).onActiveViewChange === 'function') {
+        viewChangeListener = (base as any).onActiveViewChange(() => {
+          console.log('活动视图变化，刷新筛选条件');
+          fetchFilterConditions();
+        });
+      }
+      
+      // 尝试监听表格变化
+      if (typeof (base as any).onTableChange === 'function') {
+        tableChangeListener = (base as any).onTableChange(() => {
+          console.log('表格变化，刷新筛选条件');
+          fetchFilterConditions();
+        });
+      }
+    } catch (e) {
+      console.warn('无法监听视图/表格变化:', e);
+    }
+
+    return () => {
+      if (viewChangeListener) {
+        viewChangeListener();
+      }
+      if (tableChangeListener) {
+        tableChangeListener();
+      }
+    };
+  }, [fetchFilterConditions]);
 
   const formatFilterValue = (value: any, type: string, operator: string): string => {
     if (value === null || value === undefined) {
