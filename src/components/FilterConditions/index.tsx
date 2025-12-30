@@ -15,11 +15,12 @@ interface FilterCondition {
   operator: string;
   value: any;
   type: string;
+  tableId?: string;
+  tableName?: string;
 }
 
 interface IFilterConditionsConfig {
   showTableName: boolean;
-  showViewName: boolean;
   showFieldType: boolean;
   showOperator: boolean;
   autoRefresh: boolean;
@@ -35,7 +36,6 @@ interface FilterConditionsProps {
 
 const defaultConfig: IFilterConditionsConfig = {
   showTableName: true,
-  showViewName: true,
   showFieldType: true,
   showOperator: true,
   autoRefresh: false,
@@ -52,8 +52,7 @@ export default function FilterConditions({
   const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState<FilterCondition[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [tableName, setTableName] = useState<string>('');
-  const [viewName, setViewName] = useState<string>('');
+  const [baseName, setBaseName] = useState<string>('');
   const [config, setConfig] = useState<IFilterConditionsConfig>(defaultConfig);
 
   const isCreate = dashboard.state === DashboardState.Create;
@@ -73,35 +72,53 @@ export default function FilterConditions({
     setLoading(true);
     setError(null);
     try {
-      // 获取当前激活的表格
-      const table = await bitable.base.getActiveTable();
-      const tableMeta = await table.getName();
-      setTableName(tableMeta);
+      // 获取文档（base）信息
+      const base = bitable.base;
+      let baseMeta: any = null;
+      
+      // 尝试获取 base 名称，如果没有直接方法，使用默认值
+      try {
+        if (typeof (base as any).getName === 'function') {
+          const name = await (base as any).getName();
+          setBaseName(name || '多维表格');
+        } else if (typeof (base as any).getMeta === 'function') {
+          baseMeta = await (base as any).getMeta();
+          setBaseName(baseMeta?.name || '多维表格');
+        } else {
+          setBaseName('多维表格');
+        }
+      } catch {
+        setBaseName('多维表格');
+      }
 
-      // 获取当前视图
-      const view = await table.getActiveView();
-      const viewMeta = await view.getName();
-      setViewName(viewMeta);
-
-      // 获取视图的筛选条件
-      // 注意：飞书 SDK 可能使用不同的方法名，如 getFilters() 或 getFilterInfo()
+      // 获取文档级别的筛选条件
+      // 尝试从 dashboard 的配置中获取 dataConditions
       let filterInfo: any = null;
       
       try {
-        // 尝试不同的可能方法名
-        if (typeof (view as any).getFilterInfo === 'function') {
-          filterInfo = await (view as any).getFilterInfo();
-        } else if (typeof (view as any).getFilters === 'function') {
-          filterInfo = await (view as any).getFilters();
-        } else if (typeof (view as any).getFilterConditions === 'function') {
-          filterInfo = await (view as any).getFilterConditions();
-        } else {
-          // 如果都没有，尝试从视图元数据中获取
-          const viewMeta = await view.getMeta();
-          filterInfo = (viewMeta as any).filterInfo || (viewMeta as any).filters || null;
+        // 方法1: 从 dashboard 配置中获取 dataConditions
+        const dashboardConfig = await dashboard.getConfig();
+        if (dashboardConfig && (dashboardConfig as any).dataConditions) {
+          filterInfo = {
+            conditions: (dashboardConfig as any).dataConditions,
+          };
+        }
+        
+        // 方法2: 尝试从 base 级别获取筛选条件
+        if (!filterInfo) {
+          if (typeof (base as any).getFilterInfo === 'function') {
+            filterInfo = await (base as any).getFilterInfo();
+          } else if (typeof (base as any).getFilters === 'function') {
+            filterInfo = await (base as any).getFilters();
+          } else if (typeof (base as any).getFilterConditions === 'function') {
+            filterInfo = await (base as any).getFilterConditions();
+          } else if (baseMeta) {
+            // 尝试从 base 元数据中获取
+            filterInfo = baseMeta.filterInfo || baseMeta.filters || null;
+          }
         }
       } catch (filterError: any) {
-        console.warn('获取筛选条件时出错，可能当前视图不支持筛选条件:', filterError);
+        console.warn('获取筛选条件时出错:', filterError);
         // 继续执行，filterInfo 为 null
       }
       
@@ -112,23 +129,50 @@ export default function FilterConditions({
         return;
       }
 
-      // 获取所有字段信息，用于映射字段ID到字段名
-      const fieldList = await table.getFieldList();
-      const fieldMap = new Map<string, { name: string; type: string }>();
+      // 获取所有表格的字段信息，用于映射字段ID到字段名
+      const tableList = await base.getTableList();
+      const fieldMap = new Map<string, { name: string; type: string; tableId: string; tableName: string }>();
       
-      for (const field of fieldList) {
-        const fieldMeta = await field.getMeta();
-        fieldMap.set(fieldMeta.id, {
-          name: fieldMeta.name,
-          type: String(fieldMeta.type),
-        });
+      // 遍历所有表格获取字段信息
+      for (const table of tableList) {
+        const tableMeta = await table.getMeta();
+        const fieldList = await table.getFieldList();
+        
+        for (const field of fieldList) {
+          const fieldMeta = await field.getMeta();
+          // 使用 tableId_fieldId 作为唯一键，因为不同表格可能有相同字段ID
+          const uniqueKey = `${tableMeta.id}_${fieldMeta.id}`;
+          fieldMap.set(uniqueKey, {
+            name: fieldMeta.name,
+            type: String(fieldMeta.type),
+            tableId: tableMeta.id,
+            tableName: tableMeta.name,
+          });
+          // 也支持只用 fieldId 查找（向后兼容）
+          if (!fieldMap.has(fieldMeta.id)) {
+            fieldMap.set(fieldMeta.id, {
+              name: fieldMeta.name,
+              type: String(fieldMeta.type),
+              tableId: tableMeta.id,
+              tableName: tableMeta.name,
+            });
+          }
+        }
       }
 
       // 转换筛选条件
       const filterConditions: FilterCondition[] = [];
       
       for (const condition of filterInfo.conditions) {
-        const fieldInfo = fieldMap.get(condition.fieldId);
+        // 尝试通过 tableId_fieldId 或 fieldId 查找字段
+        let fieldInfo = null;
+        if (condition.tableId && condition.fieldId) {
+          fieldInfo = fieldMap.get(`${condition.tableId}_${condition.fieldId}`);
+        }
+        if (!fieldInfo && condition.fieldId) {
+          fieldInfo = fieldMap.get(condition.fieldId);
+        }
+        
         if (fieldInfo) {
           filterConditions.push({
             fieldId: condition.fieldId,
@@ -136,6 +180,19 @@ export default function FilterConditions({
             operator: condition.operator || 'unknown',
             value: condition.value || '',
             type: fieldInfo.type,
+            tableId: fieldInfo.tableId,
+            tableName: fieldInfo.tableName,
+          });
+        } else {
+          // 如果找不到字段信息，仍然显示筛选条件
+          filterConditions.push({
+            fieldId: condition.fieldId || 'unknown',
+            fieldName: condition.fieldName || `字段 ${condition.fieldId || 'unknown'}`,
+            operator: condition.operator || 'unknown',
+            value: condition.value || '',
+            type: condition.type || 'unknown',
+            tableId: condition.tableId,
+            tableName: condition.tableName,
           });
         }
       }
@@ -281,24 +338,22 @@ export default function FilterConditions({
           <Empty description="当前视图没有筛选条件" />
         ) : (
           <div className="filter-conditions-content">
-            {(tableName || viewName) && (config.showTableName || config.showViewName) && (
+            {baseName && (
               <div className="filter-conditions-meta">
-                {tableName && config.showTableName && (
-                  <Text type="tertiary" size="small">
-                    表格: {tableName}
-                  </Text>
-                )}
-                {viewName && config.showViewName && (
-                  <Text type="tertiary" size="small" style={{ marginLeft: 12 }}>
-                    视图: {viewName}
-                  </Text>
-                )}
+                <Text type="tertiary" size="small">
+                  文档: {baseName}
+                </Text>
               </div>
             )}
             <div className="filter-conditions-list">
               {filters.map((filter, index) => (
-                <div key={`${filter.fieldId}-${index}`} className="filter-condition-item">
+                <div key={`${filter.tableId || ''}_${filter.fieldId}_${index}`} className="filter-condition-item">
                   <Space align="center" wrap>
+                    {filter.tableName && config.showTableName && (
+                      <Tag color="purple" size="small">
+                        {filter.tableName}
+                      </Tag>
+                    )}
                     <Tag color="blue" size="large">
                       {filter.fieldName}
                     </Tag>
@@ -354,18 +409,6 @@ function ConfigPanel(props: {
               setConfig({
                 ...config,
                 showTableName: checked ?? false,
-              });
-            }}
-          />
-        </Item>
-
-        <Item label="显示视图名称">
-          <Switch
-            checked={config.showViewName}
-            onChange={(checked) => {
-              setConfig({
-                ...config,
-                showViewName: checked ?? false,
               });
             }}
           />
