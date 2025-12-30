@@ -319,19 +319,28 @@ export default function FilterConditions({
 
     setDataLoading(true);
     try {
+      console.log('========== 开始获取数据源数据 ==========');
+      console.log('数据源配置:', config.dataSource);
+      
       const base = bitable.base;
       const table = await base.getTableById(config.dataSource.tableId);
+      console.log('获取到的表格对象:', table);
+      
       let view = null;
 
       // 如果指定了视图，使用指定视图；否则使用活动视图
       if (config.dataSource.viewId) {
         view = await table.getViewById(config.dataSource.viewId);
+        console.log('使用指定视图 ID:', config.dataSource.viewId);
       } else {
         view = await table.getActiveView();
+        console.log('使用活动视图');
       }
+      console.log('获取到的视图对象:', view);
 
       // 获取字段列表
       const fieldList = await table.getFieldList();
+      console.log('字段列表对象:', fieldList);
       const fields: Array<{ id: string; name: string; type: string }> = [];
       
       for (const field of fieldList) {
@@ -342,6 +351,7 @@ export default function FilterConditions({
           type: String(fieldMeta.type),
         });
       }
+      console.log('解析后的字段数组:', fields);
 
       // 构建表格列
       const columns = fields.map((field) => ({
@@ -362,25 +372,33 @@ export default function FilterConditions({
       try {
         if (typeof (view as any).getRecords === 'function') {
           const result = await (view as any).getRecords({ pageSize: 100 });
+          console.log('view.getRecords() 原始返回:', result);
           // 处理返回结果，可能是数组或包含 records 属性的对象
           records = Array.isArray(result) ? result : (result?.records || []);
         } else if (typeof (view as any).getRecordList === 'function') {
           const result = await (view as any).getRecordList({ pageSize: 100 });
+          console.log('view.getRecordList() 原始返回:', result);
           records = Array.isArray(result) ? result : (result?.records || []);
         } else if (typeof (view as any).getRecordsByPage === 'function') {
           const result = await (view as any).getRecordsByPage({ pageSize: 100 });
+          console.log('view.getRecordsByPage() 原始返回:', result);
           records = Array.isArray(result) ? result : (result?.records || []);
         } else {
           // 尝试从表格获取记录
           const tableResult = await table.getRecords({ pageSize: 100 });
+          console.log('table.getRecords() 原始返回:', tableResult);
           records = Array.isArray(tableResult) ? tableResult : (tableResult?.records || []);
         }
+        console.log('解析后的记录数组:', records);
+        console.log('记录数量:', records.length);
       } catch (e) {
         console.warn('获取记录失败，尝试其他方法:', e);
         // 如果视图方法失败，尝试从表格获取
         try {
           const tableResult = await table.getRecords({ pageSize: 100 });
+          console.log('fallback table.getRecords() 原始返回:', tableResult);
           records = Array.isArray(tableResult) ? tableResult : (tableResult?.records || []);
+          console.log('fallback 解析后的记录数组:', records);
         } catch (e2) {
           console.error('从表格获取记录也失败:', e2);
           records = [];
@@ -388,23 +406,48 @@ export default function FilterConditions({
       }
 
       const recordData = await Promise.all(
-        records.map(async (record: any) => {
+        records.map(async (record: any, index: number) => {
+          console.log(`处理第 ${index + 1} 条记录:`, record);
           const recordObj: any = { id: record.id || record.recordId };
           for (const field of fields) {
             try {
               const cell = await record.getCell(field.id);
               const value = await cell.getValue();
               recordObj[field.id] = value;
+              console.log(`  字段 ${field.name} (${field.id}):`, value);
             } catch (e) {
+              console.warn(`  字段 ${field.name} (${field.id}) 获取失败:`, e);
               recordObj[field.id] = null;
             }
           }
+          console.log(`  处理完成的记录对象:`, recordObj);
           return recordObj;
         })
       );
 
       setDataRecords(recordData);
-      console.log('获取到数据记录:', recordData.length, '条');
+      
+      // 打印汇总信息
+      console.log('========== 数据获取完成 ==========');
+      console.log('获取到数据记录数量:', recordData.length, '条');
+      console.log('数据记录详情:', recordData);
+      console.log('表格列配置:', columns);
+      console.log('字段信息:', fields);
+      console.log('表格名称:', config.dataSource.tableName);
+      console.log('视图名称:', config.dataSource.viewName);
+      console.log('========== 数据打印结束 ==========');
+      
+      // 打印每条记录的详细信息
+      recordData.forEach((record, index) => {
+        console.log(`\n--- 记录 ${index + 1} ---`);
+        console.log('记录 ID:', record.id);
+        Object.keys(record).forEach((key) => {
+          if (key !== 'id') {
+            const field = fields.find((f) => f.id === key);
+            console.log(`  ${field?.name || key} (${key}):`, record[key]);
+          }
+        });
+      });
     } catch (err: any) {
       console.error('获取数据源数据失败:', err);
       setError(err?.message || '获取数据失败');
