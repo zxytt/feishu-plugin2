@@ -1,7 +1,7 @@
 import './style.scss';
 import React, { useEffect, useState, useCallback } from 'react';
 import { bitable, dashboard, DashboardState, IConfig } from '@lark-base-open/js-sdk';
-import { Card, Button, Typography, Empty, Spin, Tag, Space, Switch, Checkbox, InputNumber, Select } from '@douyinfe/semi-ui';
+import { Card, Button, Typography, Empty, Spin, Tag, Space, Switch, Checkbox, InputNumber, Select, Table } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import { useConfig } from '../../hooks';
 import { Item } from '../Item';
@@ -60,6 +60,9 @@ export default function FilterConditions({
   const [error, setError] = useState<string | null>(null);
   const [baseName, setBaseName] = useState<string>('');
   const [config, setConfig] = useState<IFilterConditionsConfig>(defaultConfig);
+  const [dataRecords, setDataRecords] = useState<any[]>([]);
+  const [dataColumns, setDataColumns] = useState<Array<{ title: string; dataIndex: string; key: string }>>([]);
+  const [dataLoading, setDataLoading] = useState(false);
 
   const isCreate = dashboard.state === DashboardState.Create;
   const isConfig = dashboard.state === DashboardState.Config || isCreate;
@@ -306,6 +309,144 @@ export default function FilterConditions({
     }
   }, [onFilterChange, config.dataSource]);
 
+  // 获取数据源的数据
+  const fetchDataSourceData = useCallback(async () => {
+    if (!config.dataSource?.tableId) {
+      setDataRecords([]);
+      setDataColumns([]);
+      return;
+    }
+
+    setDataLoading(true);
+    try {
+      const base = bitable.base;
+      const table = await base.getTableById(config.dataSource.tableId);
+      let view = null;
+
+      // 如果指定了视图，使用指定视图；否则使用活动视图
+      if (config.dataSource.viewId) {
+        view = await table.getViewById(config.dataSource.viewId);
+      } else {
+        view = await table.getActiveView();
+      }
+
+      // 获取字段列表
+      const fieldList = await table.getFieldList();
+      const fields: Array<{ id: string; name: string; type: string }> = [];
+      
+      for (const field of fieldList) {
+        const fieldMeta = await field.getMeta();
+        fields.push({
+          id: fieldMeta.id,
+          name: fieldMeta.name,
+          type: String(fieldMeta.type),
+        });
+      }
+
+      // 构建表格列
+      const columns = fields.map((field) => ({
+        title: field.name,
+        dataIndex: field.id,
+        key: field.id,
+        width: 150,
+        render: (text: any, record: any) => {
+          const value = record[field.id];
+          return formatFieldValue(value, field.type);
+        },
+      }));
+
+      setDataColumns(columns);
+
+      // 获取记录
+      let records: any[] = [];
+      try {
+        if (typeof (view as any).getRecords === 'function') {
+          const result = await (view as any).getRecords({ pageSize: 100 });
+          // 处理返回结果，可能是数组或包含 records 属性的对象
+          records = Array.isArray(result) ? result : (result?.records || []);
+        } else if (typeof (view as any).getRecordList === 'function') {
+          const result = await (view as any).getRecordList({ pageSize: 100 });
+          records = Array.isArray(result) ? result : (result?.records || []);
+        } else if (typeof (view as any).getRecordsByPage === 'function') {
+          const result = await (view as any).getRecordsByPage({ pageSize: 100 });
+          records = Array.isArray(result) ? result : (result?.records || []);
+        } else {
+          // 尝试从表格获取记录
+          const tableResult = await table.getRecords({ pageSize: 100 });
+          records = Array.isArray(tableResult) ? tableResult : (tableResult?.records || []);
+        }
+      } catch (e) {
+        console.warn('获取记录失败，尝试其他方法:', e);
+        // 如果视图方法失败，尝试从表格获取
+        try {
+          const tableResult = await table.getRecords({ pageSize: 100 });
+          records = Array.isArray(tableResult) ? tableResult : (tableResult?.records || []);
+        } catch (e2) {
+          console.error('从表格获取记录也失败:', e2);
+          records = [];
+        }
+      }
+
+      const recordData = await Promise.all(
+        records.map(async (record: any) => {
+          const recordObj: any = { id: record.id || record.recordId };
+          for (const field of fields) {
+            try {
+              const cell = await record.getCell(field.id);
+              const value = await cell.getValue();
+              recordObj[field.id] = value;
+            } catch (e) {
+              recordObj[field.id] = null;
+            }
+          }
+          return recordObj;
+        })
+      );
+
+      setDataRecords(recordData);
+      console.log('获取到数据记录:', recordData.length, '条');
+    } catch (err: any) {
+      console.error('获取数据源数据失败:', err);
+      setError(err?.message || '获取数据失败');
+      setDataRecords([]);
+      setDataColumns([]);
+    } finally {
+      setDataLoading(false);
+    }
+  }, [config.dataSource]);
+
+  // 格式化字段值用于展示
+  const formatFieldValue = (value: any, type: string): string => {
+    if (value === null || value === undefined) {
+      return '-';
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((v) => {
+        if (typeof v === 'object' && v !== null) {
+          return v.name || v.text || JSON.stringify(v);
+        }
+        return String(v);
+      }).join(', ');
+    }
+
+    if (typeof value === 'object' && value !== null) {
+      return value.name || value.text || JSON.stringify(value);
+    }
+
+    if (type === 'DateTime' || type === 'CreatedTime' || type === 'LastModifiedTime') {
+      if (typeof value === 'number') {
+        return new Date(value).toLocaleString('zh-CN');
+      }
+    }
+
+    if (type === 'Checkbox') {
+      return value ? '是' : '否';
+    }
+
+    return String(value);
+  };
+
   // 配置管理
   const updateConfig = useCallback((res: IConfig) => {
     const { customConfig, dataConditions } = res;
@@ -363,11 +504,13 @@ export default function FilterConditions({
         viewChangeListener = (base as any).onViewChange(() => {
           console.log('视图变化，刷新筛选条件');
           fetchFilterConditions();
+          fetchDataSourceData();
         });
       } else if (typeof (base as any).onActiveViewChange === 'function') {
         viewChangeListener = (base as any).onActiveViewChange(() => {
           console.log('活动视图变化，刷新筛选条件');
           fetchFilterConditions();
+          fetchDataSourceData();
         });
       }
       
@@ -376,6 +519,7 @@ export default function FilterConditions({
         tableChangeListener = (base as any).onTableChange(() => {
           console.log('表格变化，刷新筛选条件');
           fetchFilterConditions();
+          fetchDataSourceData();
         });
       }
     } catch (e) {
@@ -390,7 +534,17 @@ export default function FilterConditions({
         tableChangeListener();
       }
     };
-  }, [fetchFilterConditions]);
+  }, [fetchFilterConditions, fetchDataSourceData]);
+
+  // 当数据源变化时，自动获取数据
+  useEffect(() => {
+    if (config.dataSource?.tableId) {
+      fetchDataSourceData();
+    } else {
+      setDataRecords([]);
+      setDataColumns([]);
+    }
+  }, [config.dataSource, fetchDataSourceData]);
 
   const formatFilterValue = (value: any, type: string, operator: string): string => {
     if (value === null || value === undefined) {
@@ -542,6 +696,56 @@ export default function FilterConditions({
         )}
       </Spin>
     </Card>
+
+        {/* 数据展示区域 */}
+        {config.dataSource?.tableId && (
+          <Card
+            className="data-source-display"
+            title={
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                <Title heading={5} style={{ margin: 0 }}>
+                  数据预览
+                  {config.dataSource.tableName && (
+                    <Text type="tertiary" size="small" style={{ marginLeft: 8 }}>
+                      ({config.dataSource.tableName}
+                      {config.dataSource.viewName && ` - ${config.dataSource.viewName}`})
+                    </Text>
+                  )}
+                </Title>
+                <Button
+                  onClick={fetchDataSourceData}
+                  loading={dataLoading}
+                  theme="borderless"
+                  type="tertiary"
+                  size="small"
+                >
+                  刷新数据
+                </Button>
+              </div>
+            }
+            style={{ width: '100%', marginTop: 16 }}
+          >
+            <Spin spinning={dataLoading}>
+              {dataRecords.length === 0 ? (
+                <Empty description="暂无数据" />
+              ) : (
+                <div style={{ maxHeight: '600px', overflow: 'auto' }}>
+                  <Table
+                    columns={dataColumns}
+                    dataSource={dataRecords}
+                    pagination={{
+                      pageSize: 20,
+                      showSizeChanger: true,
+                      showTotal: ((total: number) => `共 ${total} 条`) as any,
+                    }}
+                    scroll={{ x: 'max-content' }}
+                    size="small"
+                  />
+                </div>
+              )}
+            </Spin>
+          </Card>
+        )}
       </div>
       {isConfig && (
         <ConfigPanel config={config} setConfig={setConfig} t={t} />
