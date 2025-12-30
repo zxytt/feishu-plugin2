@@ -1,7 +1,7 @@
 import './style.scss';
 import React, { useEffect, useState, useCallback } from 'react';
 import { bitable, dashboard, DashboardState, IConfig } from '@lark-base-open/js-sdk';
-import { Card, Button, Typography, Empty, Spin, Tag, Space, Switch, Checkbox, InputNumber } from '@douyinfe/semi-ui';
+import { Card, Button, Typography, Empty, Spin, Tag, Space, Switch, Checkbox, InputNumber, Select } from '@douyinfe/semi-ui';
 import { useTranslation } from 'react-i18next';
 import { useConfig } from '../../hooks';
 import { Item } from '../Item';
@@ -25,6 +25,12 @@ interface IFilterConditionsConfig {
   showOperator: boolean;
   autoRefresh: boolean;
   refreshInterval: number; // 秒
+  dataSource?: {
+    tableId?: string;
+    tableName?: string;
+    viewId?: string;
+    viewName?: string;
+  };
 }
 
 interface FilterConditionsProps {
@@ -83,12 +89,70 @@ export default function FilterConditions({
       }
 
       // 获取文档级别的筛选条件
-      // 尝试从 dashboard 的配置中获取 dataConditions
       let filterInfo: any = null;
-      let dataConditions: any[] = [];
       
       try {
-        // 方法3: 尝试从 base 级别获取筛选条件
+        // 如果配置了数据源，从指定的表格和视图获取筛选条件
+        if (config.dataSource?.tableId) {
+          try {
+            const table = await base.getTableById(config.dataSource.tableId);
+            let view = null;
+            
+            // 如果指定了视图，使用指定视图；否则使用活动视图
+            if (config.dataSource.viewId) {
+              view = await table.getViewById(config.dataSource.viewId);
+            } else {
+              view = await table.getActiveView();
+            }
+            
+            // 尝试从视图获取筛选条件
+            if (view) {
+              try {
+                if (typeof (view as any).getFilterInfo === 'function') {
+                  filterInfo = await (view as any).getFilterInfo();
+                  console.log('从指定视图获取到筛选条件:', filterInfo);
+                } else if (typeof (view as any).getFilters === 'function') {
+                  filterInfo = await (view as any).getFilters();
+                  console.log('从指定视图获取到筛选条件:', filterInfo);
+                } else if (typeof (view as any).getFilterConditions === 'function') {
+                  filterInfo = await (view as any).getFilterConditions();
+                  console.log('从指定视图获取到筛选条件:', filterInfo);
+                } else {
+                  const viewMeta = await view.getMeta();
+                  filterInfo = (viewMeta as any).filterInfo || (viewMeta as any).filters || null;
+                  if (filterInfo) {
+                    console.log('从视图元数据获取到筛选条件:', filterInfo);
+                  }
+                }
+              } catch (e) {
+                console.warn('从指定视图获取筛选条件失败:', e);
+              }
+            }
+          } catch (e) {
+            console.warn('获取指定表格/视图失败:', e);
+          }
+        }
+        
+        // 如果还没有获取到，尝试从 dashboard 配置中获取
+        if (!filterInfo) {
+          try {
+            const dashboardConfig = await dashboard.getConfig();
+            console.log('Dashboard Config:', dashboardConfig);
+            
+            if (dashboardConfig && (dashboardConfig as any).dataConditions) {
+              const dataConditions = (dashboardConfig as any).dataConditions;
+              if (Array.isArray(dataConditions) && dataConditions.length > 0) {
+                filterInfo = { conditions: dataConditions };
+                console.log('从 dashboard.getConfig() 获取到筛选条件:', dataConditions);
+              }
+            }
+          } catch (e) {
+            console.warn('从 dashboard 配置获取筛选条件失败:', e);
+          }
+        }
+        
+        // 如果还没有获取到，尝试从 base 级别获取筛选条件
+        if (!filterInfo) {
           try {
             if (typeof (base as any).getFilterInfo === 'function') {
               filterInfo = await (base as any).getFilterInfo();
@@ -109,6 +173,7 @@ export default function FilterConditions({
           } catch (e) {
             console.warn('从 base 获取筛选条件失败:', e);
           }
+        }
       } catch (filterError: any) {
         console.warn('获取筛选条件时出错:', filterError);
         // 继续执行，filterInfo 为 null
@@ -134,33 +199,61 @@ export default function FilterConditions({
       
       console.log('找到筛选条件:', filterInfo.conditions);
 
-      // 获取所有表格的字段信息，用于映射字段ID到字段名
-      const tableList = await base.getTableList();
+      // 获取字段信息，用于映射字段ID到字段名
       const fieldMap = new Map<string, { name: string; type: string; tableId: string; tableName: string }>();
       
-      // 遍历所有表格获取字段信息
-      for (const table of tableList) {
-        const tableMeta = await table.getMeta();
-        const fieldList = await table.getFieldList();
-        
-        for (const field of fieldList) {
-          const fieldMeta = await field.getMeta();
-          // 使用 tableId_fieldId 作为唯一键，因为不同表格可能有相同字段ID
-          const uniqueKey = `${tableMeta.id}_${fieldMeta.id}`;
-          fieldMap.set(uniqueKey, {
-            name: fieldMeta.name,
-            type: String(fieldMeta.type),
-            tableId: tableMeta.id,
-            tableName: tableMeta.name,
-          });
-          // 也支持只用 fieldId 查找（向后兼容）
-          if (!fieldMap.has(fieldMeta.id)) {
-            fieldMap.set(fieldMeta.id, {
+      // 如果配置了数据源，只获取指定表格的字段信息
+      if (config.dataSource?.tableId) {
+        try {
+          const table = await base.getTableById(config.dataSource.tableId);
+          const tableMeta = await table.getMeta();
+          const fieldList = await table.getFieldList();
+          
+          for (const field of fieldList) {
+            const fieldMeta = await field.getMeta();
+            const uniqueKey = `${tableMeta.id}_${fieldMeta.id}`;
+            fieldMap.set(uniqueKey, {
               name: fieldMeta.name,
               type: String(fieldMeta.type),
               tableId: tableMeta.id,
               tableName: tableMeta.name,
             });
+            if (!fieldMap.has(fieldMeta.id)) {
+              fieldMap.set(fieldMeta.id, {
+                name: fieldMeta.name,
+                type: String(fieldMeta.type),
+                tableId: tableMeta.id,
+                tableName: tableMeta.name,
+              });
+            }
+          }
+        } catch (e) {
+          console.warn('获取指定表格字段信息失败:', e);
+        }
+      } else {
+        // 否则获取所有表格的字段信息
+        const tableList = await base.getTableList();
+        for (const table of tableList) {
+          const tableMeta = await table.getMeta();
+          const fieldList = await table.getFieldList();
+          
+          for (const field of fieldList) {
+            const fieldMeta = await field.getMeta();
+            const uniqueKey = `${tableMeta.id}_${fieldMeta.id}`;
+            fieldMap.set(uniqueKey, {
+              name: fieldMeta.name,
+              type: String(fieldMeta.type),
+              tableId: tableMeta.id,
+              tableName: tableMeta.name,
+            });
+            if (!fieldMap.has(fieldMeta.id)) {
+              fieldMap.set(fieldMeta.id, {
+                name: fieldMeta.name,
+                type: String(fieldMeta.type),
+                tableId: tableMeta.id,
+                tableName: tableMeta.name,
+              });
+            }
           }
         }
       }
@@ -211,7 +304,7 @@ export default function FilterConditions({
     } finally {
       setLoading(false);
     }
-  }, [onFilterChange]);
+  }, [onFilterChange, config.dataSource]);
 
   // 配置管理
   const updateConfig = useCallback((res: IConfig) => {
@@ -463,18 +556,170 @@ function ConfigPanel(props: {
   t: ReturnType<typeof useTranslation>['t'];
 }) {
   const { config, setConfig, t } = props;
+  const [tables, setTables] = useState<Array<{ id: string; name: string }>>([]);
+  const [views, setViews] = useState<Array<{ id: string; name: string }>>([]);
+  const [loading, setLoading] = useState(false);
+
+  // 加载表格列表
+  useEffect(() => {
+    const loadTables = async () => {
+      try {
+        setLoading(true);
+        const base = bitable.base;
+        const tableList = await base.getTableList();
+        const tableData = await Promise.all(
+          tableList.map(async (table) => {
+            const meta = await table.getMeta();
+            return { id: meta.id, name: meta.name };
+          })
+        );
+        setTables(tableData);
+      } catch (err) {
+        console.error('加载表格列表失败:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadTables();
+  }, []);
+
+  // 加载视图列表
+  useEffect(() => {
+    const loadViews = async () => {
+      if (!config.dataSource?.tableId) {
+        setViews([]);
+        return;
+      }
+      try {
+        setLoading(true);
+        const base = bitable.base;
+        const table = await base.getTableById(config.dataSource.tableId);
+        const viewList = await table.getViewList();
+        const viewData = await Promise.all(
+          viewList.map(async (view) => {
+            const meta = await view.getMeta();
+            return { id: meta.id, name: meta.name };
+          })
+        );
+        setViews(viewData);
+      } catch (err) {
+        console.error('加载视图列表失败:', err);
+        setViews([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadViews();
+  }, [config.dataSource?.tableId]);
+
+  // 当表格变化时，清空视图选择
+  const handleTableChange = (value: string | number | any[] | Record<string, any> | undefined) => {
+    if (typeof value !== 'string' || !value) {
+      setConfig({
+        ...config,
+        dataSource: undefined,
+      });
+      return;
+    }
+    const selectedTable = tables.find((t) => t.id === value);
+    setConfig({
+      ...config,
+      dataSource: {
+        tableId: value,
+        tableName: selectedTable?.name,
+        viewId: undefined,
+        viewName: undefined,
+      },
+    });
+  };
+
+  // 当视图变化时
+  const handleViewChange = (value: string | number | any[] | Record<string, any> | undefined) => {
+    if (typeof value !== 'string' || !value) {
+      setConfig({
+        ...config,
+        dataSource: {
+          ...config.dataSource,
+          viewId: undefined,
+          viewName: undefined,
+        },
+      });
+      return;
+    }
+    const selectedView = views.find((v) => v.id === value);
+    setConfig({
+      ...config,
+      dataSource: {
+        ...config.dataSource,
+        viewId: value,
+        viewName: selectedView?.name,
+      },
+    });
+  };
 
   /**保存配置 */
-  const onSaveConfig = () => {
-    dashboard.saveConfig({
+  const onSaveConfig = async () => {
+    // 构建 dataConditions，如果选择了数据源
+    let dataConditions: any[] = [];
+    
+    if (config.dataSource?.tableId) {
+      const condition: any = {
+        tableId: config.dataSource.tableId,
+      };
+      
+      if (config.dataSource.viewId) {
+        condition.viewId = config.dataSource.viewId;
+      }
+      
+      dataConditions = [condition];
+    }
+
+    await dashboard.saveConfig({
       customConfig: config,
-      dataConditions: [],
+      dataConditions,
     } as any);
   };
 
   return (
     <div className="config-panel">
       <div className="form">
+        <Item label="数据源 - 表格">
+          <Select
+            placeholder="请选择表格"
+            value={config.dataSource?.tableId}
+            onChange={handleTableChange}
+            loading={loading}
+            style={{ width: '100%' }}
+            filter
+            showClear
+          >
+            {tables.map((table) => (
+              <Select.Option key={table.id} value={table.id}>
+                {table.name}
+              </Select.Option>
+            ))}
+          </Select>
+        </Item>
+
+        <Item label="数据源 - 视图">
+          <Select
+            placeholder={config.dataSource?.tableId ? '请选择视图' : '请先选择表格'}
+            value={config.dataSource?.viewId}
+            onChange={handleViewChange}
+            loading={loading}
+            disabled={!config.dataSource?.tableId}
+            style={{ width: '100%' }}
+            filter
+            showClear
+          >
+            {views.map((view) => (
+              <Select.Option key={view.id} value={view.id}>
+                {view.name}
+              </Select.Option>
+            ))}
+          </Select>
+        </Item>
+
         <Item label="显示表格名称">
           <Switch
             checked={config.showTableName}
