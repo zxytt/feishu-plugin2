@@ -649,13 +649,52 @@ export default function FilterConditions({
     const offConfigChange = dashboard.onConfigChange((r: any) => {
       // 当配置变化时，检查 dataConditions 是否变化
       if (r.data && (r.data as any).dataConditions !== undefined) {
+        console.log('仪表盘配置变化，筛选条件可能已更新，自动刷新');
         fetchFilterConditions();
+        if (config.dataSource?.tableId) {
+          fetchDataSourceData();
+        }
       }
     });
+
+    // 尝试监听仪表盘的筛选条件变化
+    let dashboardFilterListener: (() => void) | null = null;
+    try {
+      const dashboardFilterMethods = [
+        'onFilterChange',
+        'onFilterInfoChange',
+        'onFiltersChange',
+        'onDataConditionsChange',
+      ];
+
+      for (const method of dashboardFilterMethods) {
+        if (typeof (dashboard as any)[method] === 'function') {
+          try {
+            dashboardFilterListener = (dashboard as any)[method](() => {
+              console.log(`仪表盘筛选条件变化 (通过 ${method})，自动刷新`);
+              fetchFilterConditions();
+              if (config.dataSource?.tableId) {
+                fetchDataSourceData();
+              }
+            });
+            console.log(`成功设置仪表盘筛选条件监听器: ${method}`);
+            break;
+          } catch (e) {
+            console.warn(`设置仪表盘筛选条件监听器 ${method} 失败:`, e);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('设置仪表盘筛选条件监听器失败:', e);
+    }
+
     return () => {
       offConfigChange();
+      if (dashboardFilterListener) {
+        dashboardFilterListener();
+      }
     };
-  }, [fetchFilterConditions]);
+  }, [fetchFilterConditions, fetchDataSourceData, config.dataSource?.tableId]);
 
   useEffect(() => {
     fetchFilterConditions();
@@ -739,6 +778,164 @@ export default function FilterConditions({
       return () => clearTimeout(timer);
     }
   }, [filters.length, config.dataSource?.tableId, config.dataSource?.viewId]);
+
+  // 监听指定表格/视图的筛选条件变化
+  useEffect(() => {
+    if (!config.dataSource?.tableId) {
+      return;
+    }
+
+    let viewFilterListener: (() => void) | null = null;
+    let viewChangeListener: (() => void) | null = null;
+    let tableFilterListener: (() => void) | null = null;
+    let checkInterval: any = null;
+    let lastFilterInfo: any = null;
+
+    const setupListeners = async () => {
+      try {
+        const base = bitable.base;
+        const table = await base.getTableById(config.dataSource!.tableId!);
+        let view = null;
+
+        // 获取视图对象
+        if (config.dataSource.viewId) {
+          view = await table.getViewById(config.dataSource.viewId);
+        } else {
+          view = await table.getActiveView();
+        }
+
+        if (!view) {
+          console.warn('无法获取视图对象，无法监听筛选条件变化');
+          return;
+        }
+
+        console.log('开始监听视图筛选条件变化');
+
+        // 方法1: 尝试使用视图的筛选条件变化监听器
+        const viewFilterMethods = [
+          'onFilterChange',
+          'onFilterInfoChange',
+          'onFiltersChange',
+          'onFilterConditionsChange',
+        ];
+
+        for (const method of viewFilterMethods) {
+          if (typeof (view as any)[method] === 'function') {
+            try {
+              viewFilterListener = (view as any)[method](() => {
+                console.log(`视图筛选条件变化 (通过 ${method})，自动刷新`);
+                fetchFilterConditions();
+                fetchDataSourceData();
+              });
+              console.log(`成功设置视图筛选条件监听器: ${method}`);
+              break;
+            } catch (e) {
+              console.warn(`设置视图筛选条件监听器 ${method} 失败:`, e);
+            }
+          }
+        }
+
+        // 方法2: 尝试使用视图变化监听器
+        if (!viewFilterListener) {
+          const viewChangeMethods = ['onChange', 'onViewChange', 'onMetaChange'];
+          for (const method of viewChangeMethods) {
+            if (typeof (view as any)[method] === 'function') {
+              try {
+                viewChangeListener = (view as any)[method](() => {
+                  console.log(`视图变化 (通过 ${method})，检查筛选条件`);
+                  fetchFilterConditions();
+                  fetchDataSourceData();
+                });
+                console.log(`成功设置视图变化监听器: ${method}`);
+                break;
+              } catch (e) {
+                console.warn(`设置视图变化监听器 ${method} 失败:`, e);
+              }
+            }
+          }
+        }
+
+        // 方法3: 尝试使用表格的筛选条件变化监听器
+        const tableFilterMethods = [
+          'onFilterChange',
+          'onFilterInfoChange',
+          'onFiltersChange',
+        ];
+
+        for (const method of tableFilterMethods) {
+          if (typeof (table as any)[method] === 'function') {
+            try {
+              tableFilterListener = (table as any)[method](() => {
+                console.log(`表格筛选条件变化 (通过 ${method})，自动刷新`);
+                fetchFilterConditions();
+                fetchDataSourceData();
+              });
+              console.log(`成功设置表格筛选条件监听器: ${method}`);
+              break;
+            } catch (e) {
+              console.warn(`设置表格筛选条件监听器 ${method} 失败:`, e);
+            }
+          }
+        }
+
+        // 方法4: 如果API不支持监听，使用轮询方式检查筛选条件变化
+        if (!viewFilterListener && !viewChangeListener && !tableFilterListener) {
+          console.log('API不支持筛选条件监听，使用轮询方式检查');
+          
+          // 获取初始筛选条件
+          try {
+            const viewMeta = await view.getMeta();
+            lastFilterInfo = JSON.stringify((viewMeta as any).filterInfo || (viewMeta as any).filters || {});
+          } catch (e) {
+            console.warn('获取初始筛选条件失败:', e);
+          }
+
+          // 每2秒检查一次筛选条件是否变化
+          checkInterval = setInterval(async () => {
+            try {
+              const currentView = config.dataSource!.viewId
+                ? await table.getViewById(config.dataSource!.viewId)
+                : await table.getActiveView();
+              
+              if (currentView) {
+                const viewMeta = await currentView.getMeta();
+                const currentFilterInfo = JSON.stringify((viewMeta as any).filterInfo || (viewMeta as any).filters || {});
+                
+                if (currentFilterInfo !== lastFilterInfo) {
+                  console.log('检测到筛选条件变化（轮询方式），自动刷新');
+                  lastFilterInfo = currentFilterInfo;
+                  fetchFilterConditions();
+                  fetchDataSourceData();
+                }
+              }
+            } catch (e) {
+              console.warn('轮询检查筛选条件失败:', e);
+            }
+          }, 2000); // 每2秒检查一次
+        }
+      } catch (e) {
+        console.error('设置筛选条件监听器失败:', e);
+      }
+    };
+
+    setupListeners();
+
+    return () => {
+      console.log('清理筛选条件监听器');
+      if (viewFilterListener) {
+        viewFilterListener();
+      }
+      if (viewChangeListener) {
+        viewChangeListener();
+      }
+      if (tableFilterListener) {
+        tableFilterListener();
+      }
+      if (checkInterval) {
+        clearInterval(checkInterval);
+      }
+    };
+  }, [config.dataSource?.tableId, config.dataSource?.viewId, fetchFilterConditions, fetchDataSourceData]);
 
   const formatFilterValue = (value: any, type: string, operator: string): string => {
     if (value === null || value === undefined) {
