@@ -266,13 +266,19 @@ export default function FilterConditions({
         return;
       }
       
-      console.log('找到筛选条件:', filterInfo.conditions);
+      console.log('========== 找到筛选条件 ==========');
+      console.log('筛选条件来源:', filterSource || '未知');
+      console.log('原始筛选条件数据:', JSON.stringify(filterInfo, null, 2));
+      console.log('筛选条件数量:', filterInfo.conditions.length);
+      console.log('筛选条件详情:', filterInfo.conditions);
 
       // 获取字段信息，用于映射字段ID到字段名
+      console.log('========== 开始获取字段信息 ==========');
       const fieldMap = new Map<string, { name: string; type: string; tableId: string; tableName: string }>();
       
       // 如果配置了数据源，只获取指定表格的字段信息
       if (config.dataSource?.tableId) {
+        console.log('从指定表格获取字段信息:', config.dataSource.tableId);
         try {
           const table = await base.getTableById(config.dataSource.tableId);
           const tableMeta = await table.getMeta();
@@ -296,11 +302,13 @@ export default function FilterConditions({
               });
             }
           }
+          console.log(`从指定表格获取到 ${fieldMap.size} 个字段映射`);
         } catch (e) {
           console.warn('获取指定表格字段信息失败:', e);
         }
       } else {
         // 否则获取所有表格的字段信息
+        console.log('从所有表格获取字段信息');
         const tableList = await base.getTableList();
         for (const table of tableList) {
           const tableMeta = await table.getMeta();
@@ -325,14 +333,27 @@ export default function FilterConditions({
             }
           }
         }
+        console.log(`从所有表格获取到 ${fieldMap.size} 个字段映射`);
       }
+
+      // 打印字段映射表
+      console.log('========== 字段映射表 ==========');
+      fieldMap.forEach((fieldInfo, key) => {
+        console.log(`  ${key}:`, fieldInfo);
+      });
+      console.log('================================\n');
 
       // 转换筛选条件
       const filterConditions: FilterCondition[] = [];
       
-      for (const condition of filterInfo.conditions) {
+      console.log('========== 开始转换筛选条件 ==========');
+      for (let i = 0; i < filterInfo.conditions.length; i++) {
+        const condition = filterInfo.conditions[i];
+        console.log(`\n处理第 ${i + 1} 个原始筛选条件:`, JSON.stringify(condition, null, 2));
+        
         // 跳过无效的筛选条件
         if (!condition || (typeof condition !== 'object')) {
+          console.warn(`  跳过无效的筛选条件 (索引 ${i}):`, condition);
           continue;
         }
         
@@ -340,6 +361,7 @@ export default function FilterConditions({
         let fieldInfo = null;
         const fieldId = condition.fieldId || condition.field_id || condition.field;
         const tableId = condition.tableId || condition.table_id || condition.table;
+        console.log(`  解析字段ID: ${fieldId}, 表格ID: ${tableId}`);
         
         if (tableId && fieldId) {
           fieldInfo = fieldMap.get(`${tableId}_${fieldId}`);
@@ -356,7 +378,8 @@ export default function FilterConditions({
         const tableName = condition.tableName || condition.table_name;
         
         if (fieldInfo) {
-          filterConditions.push({
+          console.log(`  找到字段信息: ${fieldInfo.name} (${fieldInfo.type})`);
+          const filterCondition = {
             fieldId: fieldId || 'unknown',
             fieldName: fieldInfo.name,
             operator: operator,
@@ -364,10 +387,13 @@ export default function FilterConditions({
             type: fieldInfo.type,
             tableId: fieldInfo.tableId,
             tableName: fieldInfo.tableName,
-          });
+          };
+          filterConditions.push(filterCondition);
+          console.log(`  转换后的筛选条件:`, JSON.stringify(filterCondition, null, 2));
         } else {
           // 如果找不到字段信息，仍然显示筛选条件（使用条件中的信息）
-          filterConditions.push({
+          console.warn(`  未找到字段信息，使用原始数据`);
+          const filterCondition = {
             fieldId: fieldId || 'unknown',
             fieldName: fieldName || `字段 ${fieldId || 'unknown'}`,
             operator: operator,
@@ -375,9 +401,28 @@ export default function FilterConditions({
             type: fieldType || 'unknown',
             tableId: tableId,
             tableName: tableName,
-          });
+          };
+          filterConditions.push(filterCondition);
+          console.log(`  转换后的筛选条件:`, JSON.stringify(filterCondition, null, 2));
         }
       }
+
+      // 打印转换后的筛选条件
+      console.log('========== 转换后的筛选条件 ==========');
+      console.log('筛选条件总数:', filterConditions.length);
+      filterConditions.forEach((filter, index) => {
+        console.log(`\n--- 筛选条件 ${index + 1} ---`);
+        console.log('  表格ID:', filter.tableId || '未指定');
+        console.log('  表格名称:', filter.tableName || '未指定');
+        console.log('  字段ID:', filter.fieldId);
+        console.log('  字段名称:', filter.fieldName);
+        console.log('  字段类型:', filter.type);
+        console.log('  操作符:', filter.operator);
+        console.log('  筛选值:', filter.value);
+        console.log('  筛选值类型:', typeof filter.value);
+        console.log('  完整筛选条件对象:', JSON.stringify(filter, null, 2));
+      });
+      console.log('========== 筛选条件打印结束 ==========\n');
 
       setFilters(filterConditions);
       onFilterChange?.(filterConditions);
