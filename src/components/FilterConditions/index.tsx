@@ -814,12 +814,14 @@ function ConfigPanel(props: {
         setLoading(true);
         const base = bitable.base;
         const tableList = await base.getTableList();
+        console.log('tableList', tableList);
         const tableData = await Promise.all(
           tableList.map(async (table) => {
             const meta = await table.getMeta();
             return { id: meta.id, name: meta.name };
           })
         );
+        console.log('tableData', tableData);
         setTables(tableData);
       } catch (err) {
         console.error('加载表格列表失败:', err);
@@ -841,13 +843,16 @@ function ConfigPanel(props: {
         setLoading(true);
         const base = bitable.base;
         const table = await base.getTableById(config.dataSource.tableId);
+        console.log('table', table);
         const viewList = await table.getViewList();
+        console.log('viewList', viewList);
         const viewData = await Promise.all(
           viewList.map(async (view) => {
             const meta = await view.getMeta();
             return { id: meta.id, name: meta.name };
           })
-        );
+        );  
+        console.log('viewData', viewData);
         setViews(viewData);
       } catch (err) {
         console.error('加载视图列表失败:', err);
