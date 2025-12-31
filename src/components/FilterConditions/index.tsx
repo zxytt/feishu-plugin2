@@ -63,6 +63,7 @@ export default function FilterConditions({
   const [dataRecords, setDataRecords] = useState<any[]>([]);
   const [dataColumns, setDataColumns] = useState<Array<{ title: string; dataIndex: string; key: string }>>([]);
   const [dataLoading, setDataLoading] = useState(false);
+  const [filterSource, setFilterSource] = useState<string>(''); // 筛选条件来源
 
   const isCreate = dashboard.state === DashboardState.Create;
   const isConfig = dashboard.state === DashboardState.Config || isCreate;
@@ -92,11 +93,59 @@ export default function FilterConditions({
       }
 
       // 获取文档级别的筛选条件
+      // 优先级：1. 仪表盘筛选条件 2. 指定视图筛选条件 3. base级别筛选条件
       let filterInfo: any = null;
       
       try {
-        // 如果配置了数据源，从指定的表格和视图获取筛选条件
-        if (config.dataSource?.tableId) {
+        // 优先尝试从 dashboard 获取筛选条件（仪表盘级别的筛选）
+        try {
+          const dashboardConfig = await dashboard.getConfig();
+          console.log('Dashboard Config:', dashboardConfig);
+          
+          // 尝试多种可能的属性名
+          const possibleFilterKeys = ['dataConditions', 'filterConditions', 'filters', 'filterInfo', 'conditions'];
+          for (const key of possibleFilterKeys) {
+            const filterData = (dashboardConfig as any)?.[key];
+            if (filterData) {
+              if (Array.isArray(filterData) && filterData.length > 0) {
+                filterInfo = { conditions: filterData };
+                setFilterSource('仪表盘筛选条件');
+                console.log(`从 dashboard.getConfig().${key} 获取到筛选条件:`, filterData);
+                break;
+              } else if (filterData && typeof filterData === 'object' && filterData.conditions) {
+                filterInfo = filterData;
+                setFilterSource('仪表盘筛选条件');
+                console.log(`从 dashboard.getConfig().${key} 获取到筛选条件:`, filterData);
+                break;
+              }
+            }
+          }
+          
+          // 尝试从 dashboard 对象直接获取
+          if (!filterInfo) {
+            const dashboardMethods = ['getFilterInfo', 'getFilters', 'getFilterConditions', 'getDataConditions'];
+            for (const method of dashboardMethods) {
+              if (typeof (dashboard as any)[method] === 'function') {
+                try {
+                  const result = await (dashboard as any)[method]();
+                  if (result) {
+                    filterInfo = Array.isArray(result) ? { conditions: result } : result;
+                    setFilterSource('仪表盘筛选条件');
+                    console.log(`从 dashboard.${method}() 获取到筛选条件:`, filterInfo);
+                    break;
+                  }
+                } catch (e) {
+                  // 继续尝试下一个方法
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('从 dashboard 获取筛选条件失败:', e);
+        }
+        
+        // 如果还没有获取到，且配置了数据源，从指定的表格和视图获取筛选条件
+        if (!filterInfo && config.dataSource?.tableId) {
           try {
             const table = await base.getTableById(config.dataSource.tableId);
             let view = null;
@@ -111,21 +160,38 @@ export default function FilterConditions({
             // 尝试从视图获取筛选条件
             if (view) {
               try {
-                if (typeof (view as any).getFilterInfo === 'function') {
-                  filterInfo = await (view as any).getFilterInfo();
-                  console.log('从指定视图获取到筛选条件:', filterInfo);
-                } else if (typeof (view as any).getFilters === 'function') {
-                  filterInfo = await (view as any).getFilters();
-                  console.log('从指定视图获取到筛选条件:', filterInfo);
-                } else if (typeof (view as any).getFilterConditions === 'function') {
-                  filterInfo = await (view as any).getFilterConditions();
-                  console.log('从指定视图获取到筛选条件:', filterInfo);
-                } else {
-                  const viewMeta = await view.getMeta();
-                  filterInfo = (viewMeta as any).filterInfo || (viewMeta as any).filters || null;
-                  if (filterInfo) {
-                    console.log('从视图元数据获取到筛选条件:', filterInfo);
+                // 尝试多种方法获取视图筛选条件
+                const viewMethods = ['getFilterInfo', 'getFilters', 'getFilterConditions'];
+                for (const method of viewMethods) {
+                  if (typeof (view as any)[method] === 'function') {
+                    try {
+                      const result = await (view as any)[method]();
+                      if (result) {
+                        filterInfo = Array.isArray(result) ? { conditions: result } : result;
+                        console.log(`从指定视图.${method}() 获取到筛选条件:`, filterInfo);
+                        break;
+                      }
+                    } catch (e) {
+                      // 继续尝试下一个方法
+                    }
                   }
+                }
+                
+                // 如果方法调用都失败，尝试从视图元数据获取
+                if (!filterInfo) {
+                  try {
+                    const viewMeta = await view.getMeta();
+                    filterInfo = (viewMeta as any).filterInfo || (viewMeta as any).filters || (viewMeta as any).filterConditions || null;
+                    if (filterInfo) {
+                      filterInfo = Array.isArray(filterInfo) ? { conditions: filterInfo } : filterInfo;
+                      setFilterSource(`视图筛选条件 (${config.dataSource.viewName || config.dataSource.viewId || '当前视图'})`);
+                      console.log('从视图元数据获取到筛选条件:', filterInfo);
+                    }
+                  } catch (e) {
+                    console.warn('从视图元数据获取筛选条件失败:', e);
+                  }
+                } else {
+                  setFilterSource(`视图筛选条件 (${config.dataSource.viewName || config.dataSource.viewId || '当前视图'})`);
                 }
               } catch (e) {
                 console.warn('从指定视图获取筛选条件失败:', e);
@@ -136,40 +202,30 @@ export default function FilterConditions({
           }
         }
         
-        // 如果还没有获取到，尝试从 dashboard 配置中获取
-        if (!filterInfo) {
-          try {
-            const dashboardConfig = await dashboard.getConfig();
-            console.log('Dashboard Config:', dashboardConfig);
-            
-            if (dashboardConfig && (dashboardConfig as any).dataConditions) {
-              const dataConditions = (dashboardConfig as any).dataConditions;
-              if (Array.isArray(dataConditions) && dataConditions.length > 0) {
-                filterInfo = { conditions: dataConditions };
-                console.log('从 dashboard.getConfig() 获取到筛选条件:', dataConditions);
-              }
-            }
-          } catch (e) {
-            console.warn('从 dashboard 配置获取筛选条件失败:', e);
-          }
-        }
-        
         // 如果还没有获取到，尝试从 base 级别获取筛选条件
         if (!filterInfo) {
           try {
-            if (typeof (base as any).getFilterInfo === 'function') {
-              filterInfo = await (base as any).getFilterInfo();
-              console.log('从 base.getFilterInfo() 获取到筛选条件:', filterInfo);
-            } else if (typeof (base as any).getFilters === 'function') {
-              filterInfo = await (base as any).getFilters();
-              console.log('从 base.getFilters() 获取到筛选条件:', filterInfo);
-            } else if (typeof (base as any).getFilterConditions === 'function') {
-              filterInfo = await (base as any).getFilterConditions();
-              console.log('从 base.getFilterConditions() 获取到筛选条件:', filterInfo);
-            } else if (baseMeta) {
-              // 尝试从 base 元数据中获取
-              filterInfo = baseMeta.filterInfo || baseMeta.filters || null;
+            const baseMethods = ['getFilterInfo', 'getFilters', 'getFilterConditions'];
+            for (const method of baseMethods) {
+              if (typeof (base as any)[method] === 'function') {
+                try {
+                  const result = await (base as any)[method]();
+                  if (result) {
+                    filterInfo = Array.isArray(result) ? { conditions: result } : result;
+                    console.log(`从 base.${method}() 获取到筛选条件:`, filterInfo);
+                    break;
+                  }
+                } catch (e) {
+                  // 继续尝试下一个方法
+                }
+              }
+            }
+            
+            // 如果方法调用都失败，尝试从 base 元数据中获取
+            if (!filterInfo && baseMeta) {
+              filterInfo = baseMeta.filterInfo || baseMeta.filters || baseMeta.filterConditions || null;
               if (filterInfo) {
+                filterInfo = Array.isArray(filterInfo) ? { conditions: filterInfo } : filterInfo;
                 console.log('从 baseMeta 获取到筛选条件:', filterInfo);
               }
             }
@@ -182,19 +238,29 @@ export default function FilterConditions({
         // 继续执行，filterInfo 为 null
       }
       
-      // 如果 filterInfo 是数组，直接使用
-      if (Array.isArray(filterInfo) && filterInfo.length > 0) {
-        filterInfo = { conditions: filterInfo };
+      // 标准化 filterInfo 格式
+      if (filterInfo) {
+        // 如果 filterInfo 是数组，转换为对象格式
+        if (Array.isArray(filterInfo) && filterInfo.length > 0) {
+          filterInfo = { conditions: filterInfo };
+        }
+        // 如果 filterInfo 是对象但没有 conditions 属性，尝试查找其他可能的属性
+        else if (filterInfo && typeof filterInfo === 'object' && !filterInfo.conditions) {
+          const possibleKeys = ['conditions', 'filters', 'filterConditions', 'items', 'data'];
+          for (const key of possibleKeys) {
+            if (Array.isArray(filterInfo[key]) && filterInfo[key].length > 0) {
+              filterInfo = { conditions: filterInfo[key] };
+              break;
+            }
+          }
+        }
       }
       
-      // 如果 filterInfo 有 conditions 属性，使用它
-      if (filterInfo && !filterInfo.conditions && Array.isArray(filterInfo)) {
-        filterInfo = { conditions: filterInfo };
-      }
-      
-      if (!filterInfo || !filterInfo.conditions || filterInfo.conditions.length === 0) {
+      // 检查是否有有效的筛选条件
+      if (!filterInfo || !filterInfo.conditions || !Array.isArray(filterInfo.conditions) || filterInfo.conditions.length === 0) {
         console.log('未找到筛选条件，当前 filterInfo:', filterInfo);
         setFilters([]);
+        setFilterSource('');
         onFilterChange?.([]);
         setLoading(false);
         return;
@@ -265,35 +331,50 @@ export default function FilterConditions({
       const filterConditions: FilterCondition[] = [];
       
       for (const condition of filterInfo.conditions) {
+        // 跳过无效的筛选条件
+        if (!condition || (typeof condition !== 'object')) {
+          continue;
+        }
+        
         // 尝试通过 tableId_fieldId 或 fieldId 查找字段
         let fieldInfo = null;
-        if (condition.tableId && condition.fieldId) {
-          fieldInfo = fieldMap.get(`${condition.tableId}_${condition.fieldId}`);
+        const fieldId = condition.fieldId || condition.field_id || condition.field;
+        const tableId = condition.tableId || condition.table_id || condition.table;
+        
+        if (tableId && fieldId) {
+          fieldInfo = fieldMap.get(`${tableId}_${fieldId}`);
         }
-        if (!fieldInfo && condition.fieldId) {
-          fieldInfo = fieldMap.get(condition.fieldId);
+        if (!fieldInfo && fieldId) {
+          fieldInfo = fieldMap.get(fieldId);
         }
+        
+        // 获取操作符和值
+        const operator = condition.operator || condition.op || condition.operation || 'unknown';
+        const value = condition.value !== undefined ? condition.value : (condition.values || '');
+        const fieldName = condition.fieldName || condition.field_name || condition.name;
+        const fieldType = condition.type || condition.fieldType || condition.field_type;
+        const tableName = condition.tableName || condition.table_name;
         
         if (fieldInfo) {
           filterConditions.push({
-            fieldId: condition.fieldId,
+            fieldId: fieldId || 'unknown',
             fieldName: fieldInfo.name,
-            operator: condition.operator || 'unknown',
-            value: condition.value || '',
+            operator: operator,
+            value: value,
             type: fieldInfo.type,
             tableId: fieldInfo.tableId,
             tableName: fieldInfo.tableName,
           });
         } else {
-          // 如果找不到字段信息，仍然显示筛选条件
+          // 如果找不到字段信息，仍然显示筛选条件（使用条件中的信息）
           filterConditions.push({
-            fieldId: condition.fieldId || 'unknown',
-            fieldName: condition.fieldName || `字段 ${condition.fieldId || 'unknown'}`,
-            operator: condition.operator || 'unknown',
-            value: condition.value || '',
-            type: condition.type || 'unknown',
-            tableId: condition.tableId,
-            tableName: condition.tableName,
+            fieldId: fieldId || 'unknown',
+            fieldName: fieldName || `字段 ${fieldId || 'unknown'}`,
+            operator: operator,
+            value: value,
+            type: fieldType || 'unknown',
+            tableId: tableId,
+            tableName: tableName,
           });
         }
       }
@@ -304,6 +385,7 @@ export default function FilterConditions({
       console.error('获取筛选条件失败:', err);
       setError(err?.message || '获取筛选条件失败');
       setFilters([]);
+      setFilterSource('');
     } finally {
       setLoading(false);
     }
@@ -367,42 +449,55 @@ export default function FilterConditions({
 
       setDataColumns(columns);
 
-      // 获取记录
+      // 获取记录（优先使用视图，因为视图可能包含筛选条件）
       let records: any[] = [];
       try {
-        if (typeof (view as any).getRecords === 'function') {
-          const result = await (view as any).getRecords({ pageSize: 100 });
-          console.log('view.getRecords() 原始返回:', result);
-          // 处理返回结果，可能是数组或包含 records 属性的对象
-          records = Array.isArray(result) ? result : (result?.records || []);
-        } else if (typeof (view as any).getRecordList === 'function') {
-          const result = await (view as any).getRecordList({ pageSize: 100 });
-          console.log('view.getRecordList() 原始返回:', result);
-          records = Array.isArray(result) ? result : (result?.records || []);
-        } else if (typeof (view as any).getRecordsByPage === 'function') {
-          const result = await (view as any).getRecordsByPage({ pageSize: 100 });
-          console.log('view.getRecordsByPage() 原始返回:', result);
-          records = Array.isArray(result) ? result : (result?.records || []);
-        } else {
-          // 尝试从表格获取记录
-          const tableResult = await table.getRecords({ pageSize: 100 });
-          console.log('table.getRecords() 原始返回:', tableResult);
-          records = Array.isArray(tableResult) ? tableResult : (tableResult?.records || []);
+        // 优先使用视图的 getRecords 方法（视图会自动应用筛选条件）
+        if (view) {
+          try {
+            // 尝试使用视图的标准方法
+            const result = await view.getRecords({ pageSize: 100 });
+            console.log('view.getRecords() 原始返回:', result);
+            // 处理返回结果，可能是数组或包含 records 属性的对象
+            records = Array.isArray(result) ? result : (result?.records || []);
+            console.log('从视图获取到记录数量:', records.length);
+          } catch (viewError) {
+            console.warn('使用 view.getRecords() 失败，尝试其他方法:', viewError);
+            // 尝试其他可能的视图方法
+            const viewMethods = ['getRecordList', 'getRecordsByPage', 'getFilteredRecords'];
+            for (const method of viewMethods) {
+              if (typeof (view as any)[method] === 'function') {
+                try {
+                  const result = await (view as any)[method]({ pageSize: 100 });
+                  records = Array.isArray(result) ? result : (result?.records || []);
+                  console.log(`使用 view.${method}() 获取到记录数量:`, records.length);
+                  break;
+                } catch (e) {
+                  // 继续尝试下一个方法
+                }
+              }
+            }
+          }
         }
-        console.log('解析后的记录数组:', records);
-        console.log('记录数量:', records.length);
+        
+        // 如果视图方法都失败，尝试从表格获取记录
+        if (records.length === 0) {
+          try {
+            const tableResult = await table.getRecords({ pageSize: 100 });
+            console.log('table.getRecords() 原始返回:', tableResult);
+            records = Array.isArray(tableResult) ? tableResult : (tableResult?.records || []);
+            console.log('从表格获取到记录数量:', records.length);
+          } catch (e2) {
+            console.error('从表格获取记录也失败:', e2);
+            records = [];
+          }
+        }
+        
+        console.log('最终解析后的记录数组:', records);
+        console.log('最终记录数量:', records.length);
       } catch (e) {
-        console.warn('获取记录失败，尝试其他方法:', e);
-        // 如果视图方法失败，尝试从表格获取
-        try {
-          const tableResult = await table.getRecords({ pageSize: 100 });
-          console.log('fallback table.getRecords() 原始返回:', tableResult);
-          records = Array.isArray(tableResult) ? tableResult : (tableResult?.records || []);
-          console.log('fallback 解析后的记录数组:', records);
-        } catch (e2) {
-          console.error('从表格获取记录也失败:', e2);
-          records = [];
-        }
+        console.error('获取记录时发生错误:', e);
+        records = [];
       }
 
       const recordData = await Promise.all(
@@ -506,7 +601,7 @@ export default function FilterConditions({
 
   // 监听配置变化，自动更新筛选条件
   useEffect(() => {
-    const offConfigChange = dashboard.onConfigChange((r) => {
+    const offConfigChange = dashboard.onConfigChange((r: any) => {
       // 当配置变化时，检查 dataConditions 是否变化
       if (r.data && (r.data as any).dataConditions !== undefined) {
         fetchFilterConditions();
@@ -588,6 +683,17 @@ export default function FilterConditions({
       setDataColumns([]);
     }
   }, [config.dataSource, fetchDataSourceData]);
+
+  // 当筛选条件变化时，如果配置了数据源，自动刷新数据
+  useEffect(() => {
+    if (config.dataSource?.tableId && filters.length > 0) {
+      // 延迟一下，确保筛选条件已经应用
+      const timer = setTimeout(() => {
+        fetchDataSourceData();
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [filters.length, config.dataSource?.tableId, config.dataSource?.viewId]);
 
   const formatFilterValue = (value: any, type: string, operator: string): string => {
     if (value === null || value === undefined) {
@@ -701,11 +807,18 @@ export default function FilterConditions({
           <Empty description="当前视图没有筛选条件" />
         ) : (
           <div className="filter-conditions-content">
-            {baseName && (
+            {(baseName || filterSource) && (
               <div className="filter-conditions-meta">
-                <Text type="tertiary" size="small">
-                  文档: {baseName}
-                </Text>
+                {baseName && (
+                  <Text type="tertiary" size="small">
+                    文档: {baseName}
+                  </Text>
+                )}
+                {filterSource && (
+                  <Text type="tertiary" size="small" style={{ marginLeft: baseName ? 12 : 0 }}>
+                    来源: {filterSource}
+                  </Text>
+                )}
               </div>
             )}
             <div className="filter-conditions-list">
